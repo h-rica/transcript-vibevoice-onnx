@@ -28,7 +28,7 @@ def main():
     if report_path.exists():
         with open(report_path) as f:
             r = json.load(f)
-        verdict = "GO" if r["go_nogo"] == "GO" else "NO-GO"
+        verdict = "✅ GO" if r["go_nogo"] == "GO" else "❌ NO-GO"
         print(f"  Verdict  : {verdict}")
         print(f"  Acoustic : {r['acoustic_passed']}/{r['n_samples']}")
         print(f"  Semantic : {r['semantic_passed']}/{r['n_samples']}")

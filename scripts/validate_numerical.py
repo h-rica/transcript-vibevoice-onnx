@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+Full numerical validation — PyTorch vs ONNX for both tokenizers.
+
+Compares the outputs of both ONNX models (acoustic + semantic) against
+their PyTorch reference on a set of random audio samples.
+Generates a JSON report and a terminal summary.
+
+Usage:
+    python scripts/validate_numerical.py
+    python scripts/validate_numerical.py --samples 50 --threshold 1e-4
+    python scripts/validate_numerical.py --artifacts artifacts/ --real-audio tests/audio/
+"""
+
+import argparse
+import json
+import sys
+import time
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional
+
+import librosa
+import numpy as np
+import onnxruntime as ort
+import torch
+from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+
+
+# Configuration
+
+MODEL_ID    = "microsoft/VibeVoice-ASR-HF"
+SAMPLE_RATE = 24_000
+THRESHOLD   = 1e-4
+
+
+# Data classes
+
+@dataclass
+class SampleResult:
+    sample_id:         int
+    duration_s:        float
+    source:            str      # "random" | "real_audio"
+    acoustic_max_err:  float
+    acoustic_mean_err: float
+    semantic_max_err:  float
+    semantic_mean_err: float
+    acoustic_ok:       bool
+    semantic_ok:       bool
+    elapsed_ms:        float
+
+
+@dataclass
+class ValidationReport:
+    model_id:         str
+    timestamp:        str
+    n_samples:        int
+    threshold:        float
+    acoustic_passed:  int
+    semantic_passed:  int
+    both_passed:      int
+    acoustic_p95_err: float
+    semantic_p95_err: float
+    go_nogo:          str
+    details:          list
+
+class VibeVoiceValidator:
+
+    def __init__(self, artifacts_dir: Path, device: str = "cpu"):
+        self.device       = device
+        self.artifacts_dir = artifacts_dir
+        self._load_pytorch_model()
+        self._load_onnx_sessions()
+
+    def _load_pytorch_model(self):
+        print("Loading PyTorch reference model...")
+        self.processor = AutoProcessor.from_pretrained(MODEL_ID)
+        self.pt_model  = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+            MODEL_ID, torch_dtype=torch.float32, device_map=self.device,
+        ).eval()
+
+        if hasattr(self.pt_model, "acoustic_tokenizer"):
+            self.pt_acoustic = self.pt_model.acoustic_tokenizer.eval()
+            self.pt_semantic = self.pt_model.semantic_tokenizer.eval()
+        else:
+            self.pt_acoustic = self.pt_model.audio_encoder.eval()
+            self.pt_semantic = self.pt_model.semantic_encoder.eval()
+
+        print("    ✓ PyTorch model loaded")
+
+    def _load_onnx_sessions(self):
+        print("Loading ONNX sessions...")
+        acoustic_path = self.artifacts_dir / "vibevoice_acoustic.onnx"
+        semantic_path = self.artifacts_dir / "vibevoice_semantic.onnx"
+
+        if not acoustic_path.exists():
+            raise FileNotFoundError(
+                f"Acoustic ONNX not found: {acoustic_path}\n"
+                "Run first: python scripts/export_acoustic.py"
+            )
+        if not semantic_path.exists():
+            raise FileNotFoundError(
+                f"Semantic ONNX not found: {semantic_path}\n"
+                "Run first: python scripts/export_semantic.py"
+            )
+
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 4
+
+        self.ort_acoustic = ort.InferenceSession(
+            str(acoustic_path), sess_options=opts,
+            providers=["CPUExecutionProvider"],
+        )
+        self.ort_semantic = ort.InferenceSession(
+            str(semantic_path), sess_options=opts,
+            providers=["CPUExecutionProvider"],
+        )
+        print("    ✓ ONNX sessions loaded")
+
+    def validate_sample(
+            self,
+            audio_np: np.ndarray,
+            sample_id: int,
+            source: str = "random",
+            threshold: float = THRESHOLD,
+    ) -> SampleResult:
+        """Validate a single audio sample."""
+        t0 = time.time()
+        duration_s  = audio_np.shape[1] / SAMPLE_RATE
+        audio_torch = torch.from_numpy(audio_np).to(self.device)
+
+        # PyTorch (reference)
+        with torch.no_grad():
+            pt_acoustic = self.pt_acoustic(audio_torch).cpu().numpy()
+            pt_semantic = self.pt_semantic(audio_torch).cpu().numpy()
+
+        # ONNX
+        ort_acoustic = self.ort_acoustic.run(["latents"],          {"audio": audio_np})[0]
+        ort_semantic = self.ort_semantic.run(["semantic_latents"], {"audio": audio_np})[0]
+
+        # Error metrics
+        acoustic_diff = np.abs(pt_acoustic - ort_acoustic)
+        semantic_diff = np.abs(pt_semantic - ort_semantic)
+
+        return SampleResult(
+            sample_id         = sample_id,
+            duration_s        = duration_s,
+            source            = source,
+            acoustic_max_err  = float(acoustic_diff.max()),
+            acoustic_mean_err = float(acoustic_diff.mean()),
+            semantic_max_err  = float(semantic_diff.max()),
+            semantic_mean_err = float(semantic_diff.mean()),
+            acoustic_ok       = float(acoustic_diff.max()) < threshold,
+            semantic_ok       = float(semantic_diff.max()) < threshold,
+            elapsed_ms        = (time.time() - t0) * 1000,
+        )
+
+    def run(
+            self,
+            n_random: int = 20,
+            real_audio_dir: Optional[Path] = None,
+            threshold: float = THRESHOLD,
+    ) -> ValidationReport:
+        """Run full validation."""
+        import datetime
+
+        print(f"\n{'─'*60}")
+        print(f"  Numerical validation — {n_random} samples  |  threshold: {threshold}")
+        print(f"{'─'*60}\n")
+
+        results: list[SampleResult] = []
+
+        # Random samples
+        print(f"[A] Random samples ({n_random})...")
+        for i in range(n_random):
+            duration = np.random.randint(5, 60)
+            audio_np = np.random.randn(1, SAMPLE_RATE * duration).astype(np.float32)
+            result   = self.validate_sample(audio_np, i + 1, "random", threshold)
+            results.append(result)
+
+            print(
+                f"  [{i+1:02d}] {duration:2d}s  "
+                f"acoustic [{'✓' if result.acoustic_ok else '✗'}] {result.acoustic_max_err:.2e}  "
+                f"semantic [{'✓' if result.semantic_ok else '✗'}] {result.semantic_max_err:.2e}  "
+                f"({result.elapsed_ms:.0f}ms)"
+            )
+
+        # Real audio files (optional)
+        if real_audio_dir and real_audio_dir.exists():
+            audio_files = (
+                    list(real_audio_dir.glob("*.wav")) +
+                    list(real_audio_dir.glob("*.mp3")) +
+                    list(real_audio_dir.glob("*.m4a"))
+            )
+            if audio_files:
+                print(f"\n[B] Real audio files ({len(audio_files)})...")
+                for j, filepath in enumerate(audio_files[:10]):
+                    try:
+                        audio, _ = librosa.load(str(filepath), sr=SAMPLE_RATE, mono=True)
+                        audio_np = audio[np.newaxis, :].astype(np.float32)
+                        result   = self.validate_sample(
+                            audio_np, n_random + j + 1, filepath.name, threshold
+                        )
+                        results.append(result)
+                        print(
+                            f"  [{filepath.name[:30]:30s}]  "
+                            f"acoustic [{'✓' if result.acoustic_ok else '✗'}] {result.acoustic_max_err:.2e}  "
+                            f"semantic [{'✓' if result.semantic_ok else '✗'}] {result.semantic_max_err:.2e}"
+                        )
+                    except Exception as e:
+                        print(f"  ⚠ Error on {filepath.name}: {e}")
+
+        # Build report
+        acoustic_errs   = [r.acoustic_max_err for r in results]
+        semantic_errs   = [r.semantic_max_err  for r in results]
+        acoustic_passed = sum(1 for r in results if r.acoustic_ok)
+        semantic_passed = sum(1 for r in results if r.semantic_ok)
+        both_passed     = sum(1 for r in results if r.acoustic_ok and r.semantic_ok)
+
+        report = ValidationReport(
+            model_id         = MODEL_ID,
+            timestamp        = datetime.datetime.utcnow().isoformat(),
+            n_samples        = len(results),
+            threshold        = threshold,
+            acoustic_passed  = acoustic_passed,
+            semantic_passed  = semantic_passed,
+            both_passed      = both_passed,
+            acoustic_p95_err = float(np.percentile(acoustic_errs, 95)),
+            semantic_p95_err = float(np.percentile(semantic_errs, 95)),
+            go_nogo          = "GO" if both_passed == len(results) else "NO-GO",
+            details          = [asdict(r) for r in results],
+        )
+
+        self._print_summary(report)
+        return report
+
+    @staticmethod
+    def _print_summary(report: ValidationReport):
+        verdict = "✅  GO" if report.go_nogo == "GO" else "❌  NO-GO"
+        print(f"\n{'═'*60}")
+        print(f"  VERDICT : {verdict}")
+        print(f"{'─'*60}")
+        print(f"  Acoustic tokenizer : {report.acoustic_passed}/{report.n_samples} "
+              f"(p95 err = {report.acoustic_p95_err:.2e})")
+        print(f"  Semantic tokenizer : {report.semantic_passed}/{report.n_samples} "
+              f"(p95 err = {report.semantic_p95_err:.2e})")
+        print(f"  Both OK            : {report.both_passed}/{report.n_samples}")
+        print(f"{'═'*60}\n")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Numerical validation — PyTorch vs ONNX for VibeVoice-ASR"
+    )
+    parser.add_argument("--artifacts",  type=Path,  default=Path("artifacts"))
+    parser.add_argument("--samples",    type=int,   default=20)
+    parser.add_argument("--threshold",  type=float, default=THRESHOLD)
+    parser.add_argument("--real-audio", type=Path,  default=None,
+                        help="Directory with real audio files for testing")
+    parser.add_argument("--output",     type=Path,  default=Path("artifacts"))
+    parser.add_argument("--device",     type=str,   default="cpu",
+                        choices=["cpu", "cuda", "mps"])
+    args = parser.parse_args()
+
+    try:
+        validator = VibeVoiceValidator(artifacts_dir=args.artifacts, device=args.device)
+        report    = validator.run(
+            n_random=args.samples,
+            real_audio_dir=args.real_audio,
+            threshold=args.threshold,
+        )
+
+        args.output.mkdir(parents=True, exist_ok=True)
+        report_path = args.output / "validation_report.json"
+        with open(report_path, "w") as f:
+            json.dump(asdict(report), f, indent=2)
+        print(f"Full report saved: {report_path}")
+
+        sys.exit(0 if report.go_nogo == "GO" else 1)
+
+    except FileNotFoundError as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
