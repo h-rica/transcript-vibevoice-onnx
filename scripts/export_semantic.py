@@ -20,26 +20,38 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
-
+from transformers import VibeVoiceAsrForConditionalGeneration
 
 # Configuration
 
 MODEL_ID    = "microsoft/VibeVoice-ASR-HF"
 SAMPLE_RATE = 24_000
 DUMMY_SECS  = 10
-OPSET       = 17
+OPSET = 18
 OUTPUT_NAME = "vibevoice_semantic.onnx"
 
 
 # Helpers
 
-def load_model(device: str) -> tuple:
+class SemanticTokenizerExportWrapper(torch.nn.Module):
+    """Expose a raw-waveform interface for ONNX export."""
+
+    def __init__(self, encoder: torch.nn.Module) -> None:
+        super().__init__()
+        self.encoder = encoder
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        if audio.dim() != 2:
+            raise ValueError(f"Expected audio shape [batch, samples], got {tuple(audio.shape)}")
+        encoded = self.encoder(audio.unsqueeze(1))
+        return encoded.latents
+
+
+def load_model(device: str) -> torch.nn.Module:
     """Load the VibeVoice-ASR model from HuggingFace."""
     print(f"[1/4] Loading model {MODEL_ID} on {device}...")
     t0 = time.time()
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
     model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float32,
@@ -47,65 +59,88 @@ def load_model(device: str) -> tuple:
     )
     model.eval()
 
-    print(f"    ✓ Model loaded in {time.time() - t0:.1f}s")
-    return processor, model
+    print(f"    Model loaded in {time.time() - t0:.1f}s")
+    return model
 
 
 def extract_semantic_tokenizer(model) -> torch.nn.Module:
     """Extract the Semantic Tokenizer submodule from the full model."""
     if hasattr(model, "semantic_tokenizer_encoder"):
-        return model.semantic_tokenizer_encoder.eval()
+        encoder = model.semantic_tokenizer_encoder.eval()
+        return SemanticTokenizerExportWrapper(encoder).eval()
     raise AttributeError(
         f"Cannot find semantic tokenizer in model. "
         f"Available submodules: {[name for name, _ in model.named_children()]}"
     )
 
 
+def build_dummy_input(device: str) -> dict:
+    """Create a dummy input tensor for ONNX export."""
+    n_samples = SAMPLE_RATE * DUMMY_SECS
+    return {"audio": torch.randn(1, n_samples, dtype=torch.float32).to(device)}
+
+
 def export_to_onnx(
         tokenizer: torch.nn.Module,
+        dummy_input: dict,
         output_path: Path,
-        device: str,
         opset: int,
 ) -> None:
-    """Export the Semantic Tokenizer to ONNX."""
+    """Export the Semantic Tokenizer to ONNX with dynamic axes."""
     print(f"[2/4] ONNX export (opset {opset})...")
     t0 = time.time()
 
-    dummy = torch.randn(1, SAMPLE_RATE * DUMMY_SECS, dtype=torch.float32).to(device)
+    export_kwargs = {
+        "opset_version": opset,
+        "input_names": ["audio"],
+        "output_names": ["semantic_latents"],
+        "do_constant_folding": True,
+        "export_params": True,
+        "verbose": False,
+    }
+    dynamic_axes = {
+        "audio": {0: "batch", 1: "samples"},
+        "semantic_latents": {0: "batch", 1: "frames"},
+    }
 
-    torch.onnx.export(
-        tokenizer,
-        (dummy,),
-        str(output_path),
-        opset_version=opset,
-        input_names=["audio"],
-        output_names=["semantic_latents"],
-        dynamic_axes={
-            "audio":            {0: "batch", 1: "samples"},
-            "semantic_latents": {0: "batch", 1: "frames"},
-        },
-        do_constant_folding=True,
-        export_params=True,
-        verbose=False,
-    )
+    try:
+        torch.onnx.export(
+            tokenizer,
+            (dummy_input["audio"],),
+            str(output_path),
+            dynamo=True,
+            dynamic_axes=dynamic_axes,
+            **export_kwargs,
+        )
+    except Exception as exc:
+        print(f"    Dynamo exporter failed: {exc.__class__.__name__}: {exc}")
+        print("    Retrying with legacy exporter (dynamo=False)...")
+        torch.onnx.export(
+            tokenizer,
+            (dummy_input["audio"],),
+            str(output_path),
+            dynamo=False,
+            dynamic_axes=dynamic_axes,
+            **export_kwargs,
+        )
 
     size_mb = output_path.stat().st_size / 1_048_576
-    print(f"    ✓ Export done in {time.time() - t0:.1f}s — {size_mb:.1f} MB")
+    print(f"    Export done in {time.time() - t0:.1f}s - {size_mb:.1f} MB")
 
 
 def validate_onnx_model(output_path: Path) -> None:
-    """Validate the ONNX model structure."""
+    """Validate the ONNX model structure using the official checker."""
     print("[3/4] Validating ONNX structure...")
     model = onnx.load(str(output_path))
     onnx.checker.check_model(model)
-    print(f"    ✓ Valid ONNX model — {len(model.graph.node)} nodes")
+    print(f"    Valid ONNX model - {len(model.graph.node)} nodes")
 
     for inp in model.graph.input:
         shape = [d.dim_value or d.dim_param for d in inp.type.tensor_type.shape.dim]
-        print(f"    ↳ Input  '{inp.name}': {shape}")
+        print(f"    Input  '{inp.name}': {shape}")
     for out in model.graph.output:
         shape = [d.dim_value or d.dim_param for d in out.type.tensor_type.shape.dim]
-        print(f"    ↳ Output '{out.name}': {shape}")
+        print(f"    Output '{out.name}': {shape}")
 
 
 def validate_numerical(
@@ -136,7 +171,7 @@ def validate_numerical(
 
         ok = max_err < threshold
         passed += int(ok)
-        print(f"    {'✓' if ok else '✗'} Sample {i+1:02d} ({duration}s) — "
+        print(f"    {'OK' if ok else 'FAIL'} Sample {i + 1:02d} ({duration}s) - "
               f"max_err={max_err:.2e}  mean_err={mean_err:.2e}")
 
     max_errors = [e["max"] for e in errors]
@@ -155,12 +190,14 @@ def validate_numerical(
         "go_nogo": "GO" if passed == n_samples else "NO-GO",
     }
 
-    verdict = "✅ GO" if report["success"] else "❌ NO-GO"
-    print(f"\n    {verdict} — {passed}/{n_samples} samples under threshold {threshold}")
+    verdict = "GO" if report["success"] else "NO-GO"
+    print(f"\n    {verdict} - {passed}/{n_samples} samples under threshold {threshold}")
+    print(f"    p95 max absolute error: {report['max_absolute_error']['p95']:.2e}")
     return report
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Export Semantic Tokenizer → ONNX")
+    parser = argparse.ArgumentParser(description="Export Semantic Tokenizer -> ONNX")
     parser.add_argument("--output",    type=Path,  default=Path("artifacts"))
     parser.add_argument("--opset",     type=int,   default=OPSET)
     parser.add_argument("--validate",  action="store_true")
@@ -174,13 +211,14 @@ def main():
     output_path = args.output / OUTPUT_NAME
 
     print("=" * 60)
-    print("  VibeVoice-ASR — Export Semantic Tokenizer → ONNX")
+    print("  VibeVoice-ASR - Export Semantic Tokenizer -> ONNX")
     print("=" * 60)
 
-    processor, model = load_model(args.device)
-    tokenizer        = extract_semantic_tokenizer(model)
+    model = load_model(args.device)
+    tokenizer = extract_semantic_tokenizer(model)
+    dummy = build_dummy_input(args.device)
 
-    export_to_onnx(tokenizer, output_path, args.device, args.opset)
+    export_to_onnx(tokenizer, dummy, output_path, args.opset)
     validate_onnx_model(output_path)
 
     report = {}
