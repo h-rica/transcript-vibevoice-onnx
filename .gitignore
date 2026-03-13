@@ -21,3 +21,4 @@ target
 .idea/
 
 artifacts/*.onnx
+artifacts/*.onnx.data

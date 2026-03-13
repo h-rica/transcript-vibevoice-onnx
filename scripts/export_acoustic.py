@@ -3,12 +3,12 @@
 """
 Export the VibeVoice-ASR Acoustic Tokenizer to ONNX.
 
-The Acoustic Tokenizer (σ-VAE encoder) converts 24kHz PCM audio
+The Acoustic Tokenizer (sigma-VAE encoder) converts 24kHz PCM audio
 into continuous latents at 7.5 Hz, used as input by the Qwen2.5 decoder.
 
 Usage:
     python scripts/export_acoustic.py --output artifacts/
-    python scripts/export_acoustic.py --output artifacts/ --opset 17 --validate
+    python scripts/export_acoustic.py --output artifacts/ --opset 18 --validate
 """
 
 import argparse
@@ -19,22 +19,35 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+from transformers import VibeVoiceAsrForConditionalGeneration
 
 # Configuration
 MODEL_ID    = "microsoft/VibeVoice-ASR-HF"
-SAMPLE_RATE = 24_000       # Hz — expected input sample rate
+SAMPLE_RATE = 24_000       # Hz - expected input sample rate
 DUMMY_SECS  = 10           # Duration of the dummy tensor used for export
-OPSET       = 17           # Minimum recommended ONNX opset
+OPSET       = 18           # Recommended ONNX opset for current PyTorch exporter
 OUTPUT_NAME = "vibevoice_acoustic.onnx"
 
 # Helpers
-def load_model(device: str) -> tuple:
+class AcousticTokenizerExportWrapper(torch.nn.Module):
+    """Expose a raw-waveform interface for ONNX export."""
+
+    def __init__(self, encoder: torch.nn.Module) -> None:
+        super().__init__()
+        self.encoder = encoder
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        if audio.dim() != 2:
+            raise ValueError(f"Expected audio shape [batch, samples], got {tuple(audio.shape)}")
+        encoded = self.encoder(audio.unsqueeze(1))
+        return encoded.latents
+
+
+def load_model(device: str) -> torch.nn.Module:
     """Load the VibeVoice-ASR model from HuggingFace."""
     print(f"[1/4] Loading model {MODEL_ID} on {device}...")
     t0 = time.time()
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
     model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float32,  # FP32 for maximum precision at export
@@ -43,12 +56,13 @@ def load_model(device: str) -> tuple:
     model.eval()
 
     print(f" Model loaded in {time.time() - t0:.1f}s")
-    return processor, model
+    return model
 
 def extract_acoustic_tokenizer(model) -> torch.nn.Module:
     """Extract the Acoustic Tokenizer submodule from the full model."""
     if hasattr(model, "acoustic_tokenizer_encoder"):
-        return model.acoustic_tokenizer_encoder.eval()
+        encoder = model.acoustic_tokenizer_encoder.eval()
+        return AcousticTokenizerExportWrapper(encoder).eval()
     raise AttributeError(
         f"Cannot find acoustic tokenizer in model. "
         f"Available submodules: {[name for name, _ in model.named_children()]}"
@@ -70,24 +84,42 @@ def export_to_onnx(
     print(f"[2/4] ONNX export (opset {opset})...")
     t0 = time.time()
 
-    torch.onnx.export(
-        tokenizer,
-        (dummy_input["audio"],),
-        str(output_path),
-        opset_version=opset,
-        input_names=["audio"],
-        output_names=["latents"],
-        dynamic_axes={
-            "audio":   {0: "batch", 1: "samples"},  # variable-length input
-            "latents": {0: "batch", 1: "frames"},    # frames = samples / 3200
-        },
-        do_constant_folding=True,
-        export_params=True,
-        verbose=False,
-    )
+    export_kwargs = {
+        "opset_version": opset,
+        "input_names": ["audio"],
+        "output_names": ["latents"],
+        "do_constant_folding": True,
+        "export_params": True,
+        "verbose": False,
+    }
+    dynamic_axes = {
+        "audio": {0: "batch", 1: "samples"},   # variable-length input
+        "latents": {0: "batch", 1: "frames"},  # frames = samples / 3200
+    }
+
+    try:
+        torch.onnx.export(
+            tokenizer,
+            (dummy_input["audio"],),
+            str(output_path),
+            dynamo=True,
+            dynamic_axes=dynamic_axes,
+            **export_kwargs,
+        )
+    except Exception as exc:
+        print(f"    Dynamo exporter failed: {exc.__class__.__name__}: {exc}")
+        print("    Retrying with legacy exporter (dynamo=False)...")
+        torch.onnx.export(
+            tokenizer,
+            (dummy_input["audio"],),
+            str(output_path),
+            dynamo=False,
+            dynamic_axes=dynamic_axes,
+            **export_kwargs,
+        )
 
     size_mb = output_path.stat().st_size / 1_048_576
-    print(f"    Export done in {time.time() - t0:.1f}s — {size_mb:.1f} MB")
+    print(f"    Export done in {time.time() - t0:.1f}s - {size_mb:.1f} MB")
 
 
 def validate_onnx_model(output_path: Path) -> None:
@@ -95,7 +127,7 @@ def validate_onnx_model(output_path: Path) -> None:
     print("[3/4] Validating ONNX structure...")
     model = onnx.load(str(output_path))
     onnx.checker.check_model(model)
-    print(f"    Valid ONNX model — {len(model.graph.node)} nodes")
+    print(f"    Valid ONNX model - {len(model.graph.node)} nodes")
 
     for inp in model.graph.input:
         shape = [d.dim_value or d.dim_param for d in inp.type.tensor_type.shape.dim]
@@ -133,7 +165,7 @@ def validate_numerical(
 
         ok = max_err < threshold
         passed += int(ok)
-        print(f"    {'✓' if ok else '✗'} Sample {i+1:02d} ({duration}s) — "
+        print(f"    {'OK' if ok else 'FAIL'} Sample {i+1:02d} ({duration}s) - "
               f"max_err={max_err:.2e}  mean_err={mean_err:.2e}")
 
     max_errors = [e["max"] for e in errors]
@@ -153,12 +185,12 @@ def validate_numerical(
     }
 
     verdict = "GO" if report["success"] else "NO-GO"
-    print(f"\n    {verdict} — {passed}/{n_samples} samples under threshold {threshold}")
+    print(f"\n    {verdict} - {passed}/{n_samples} samples under threshold {threshold}")
     print(f"    p95 max absolute error: {report['max_absolute_error']['p95']:.2e}")
     return report
 
 def main():
-    parser = argparse.ArgumentParser(description="Export Acoustic Tokenizer → ONNX")
+    parser = argparse.ArgumentParser(description="Export Acoustic Tokenizer -> ONNX")
     parser.add_argument("--output",    type=Path,  default=Path("artifacts"),
                         help="Output directory for the .onnx file")
     parser.add_argument("--opset",     type=int,   default=OPSET,
@@ -177,12 +209,12 @@ def main():
     output_path = args.output / OUTPUT_NAME
 
     print("=" * 60)
-    print("  VibeVoice-ASR — Export Acoustic Tokenizer → ONNX")
+    print("  VibeVoice-ASR - Export Acoustic Tokenizer -> ONNX")
     print("=" * 60)
 
-    processor, model = load_model(args.device)
-    tokenizer        = extract_acoustic_tokenizer(model)
-    dummy_input      = build_dummy_input(args.device)
+    model       = load_model(args.device)
+    tokenizer   = extract_acoustic_tokenizer(model)
+    dummy_input = build_dummy_input(args.device)
 
     export_to_onnx(tokenizer, dummy_input, output_path, args.opset)
     validate_onnx_model(output_path)
