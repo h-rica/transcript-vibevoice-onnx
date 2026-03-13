@@ -22,7 +22,8 @@ import onnxruntime as ort
 import torch
 from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
 
-# Configuration 
+
+# Configuration
 
 MODEL_ID    = "microsoft/VibeVoice-ASR-HF"
 SAMPLE_RATE = 24_000
@@ -52,13 +53,11 @@ def load_model(device: str) -> tuple:
 
 def extract_semantic_tokenizer(model) -> torch.nn.Module:
     """Extract the Semantic Tokenizer submodule from the full model."""
-    if hasattr(model, "semantic_tokenizer"):
-        return model.semantic_tokenizer.eval()
-    elif hasattr(model, "semantic_encoder"):
-        return model.semantic_encoder.eval()
+    if hasattr(model, "semantic_tokenizer_encoder"):
+        return model.semantic_tokenizer_encoder.eval()
     raise AttributeError(
-        "Cannot find semantic tokenizer in model. "
-        "Inspect model structure with: print(model)"
+        f"Cannot find semantic tokenizer in model. "
+        f"Available submodules: {[name for name, _ in model.named_children()]}"
     )
 
 

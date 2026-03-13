@@ -26,15 +26,10 @@ import onnxruntime as ort
 import torch
 from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
 
-
-# Configuration
-
 MODEL_ID    = "microsoft/VibeVoice-ASR-HF"
 SAMPLE_RATE = 24_000
 THRESHOLD   = 1e-4
 
-
-# Data classes
 
 @dataclass
 class SampleResult:
@@ -64,6 +59,7 @@ class ValidationReport:
     go_nogo:          str
     details:          list
 
+
 class VibeVoiceValidator:
 
     def __init__(self, artifacts_dir: Path, device: str = "cpu"):
@@ -79,12 +75,14 @@ class VibeVoiceValidator:
             MODEL_ID, torch_dtype=torch.float32, device_map=self.device,
         ).eval()
 
-        if hasattr(self.pt_model, "acoustic_tokenizer"):
-            self.pt_acoustic = self.pt_model.acoustic_tokenizer.eval()
-            self.pt_semantic = self.pt_model.semantic_tokenizer.eval()
+        if hasattr(self.pt_model, "acoustic_tokenizer_encoder"):
+            self.pt_acoustic = self.pt_model.acoustic_tokenizer_encoder.eval()
+            self.pt_semantic = self.pt_model.semantic_tokenizer_encoder.eval()
         else:
-            self.pt_acoustic = self.pt_model.audio_encoder.eval()
-            self.pt_semantic = self.pt_model.semantic_encoder.eval()
+            raise AttributeError(
+                f"Cannot find tokenizers in model. "
+                f"Available: {[n for n, _ in self.pt_model.named_children()]}"
+            )
 
         print("    ✓ PyTorch model loaded")
 
@@ -246,6 +244,7 @@ class VibeVoiceValidator:
               f"(p95 err = {report.semantic_p95_err:.2e})")
         print(f"  Both OK            : {report.both_passed}/{report.n_samples}")
         print(f"{'═'*60}\n")
+
 
 def main():
     parser = argparse.ArgumentParser(

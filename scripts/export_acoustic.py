@@ -45,6 +45,16 @@ def load_model(device: str) -> tuple:
     print(f" Model loaded in {time.time() - t0:.1f}s")
     return processor, model
 
+def extract_acoustic_tokenizer(model) -> torch.nn.Module:
+    """Extract the Acoustic Tokenizer submodule from the full model."""
+    if hasattr(model, "acoustic_tokenizer_encoder"):
+        return model.acoustic_tokenizer_encoder.eval()
+    raise AttributeError(
+        f"Cannot find acoustic tokenizer in model. "
+        f"Available submodules: {[name for name, _ in model.named_children()]}"
+    )
+
+
 def build_dummy_input(device: str) -> dict:
     """Create a dummy input tensor for ONNX export."""
     n_samples = SAMPLE_RATE * DUMMY_SECS
@@ -197,4 +207,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
