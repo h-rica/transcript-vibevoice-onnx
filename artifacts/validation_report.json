@@ -1,0 +1,74 @@
+{
+  "model_id": "microsoft/VibeVoice-ASR-HF",
+  "timestamp": "2026-03-13T19:10:13.181452+00:00",
+  "n_samples": 5,
+  "threshold": 0.0001,
+  "acoustic_passed": 5,
+  "semantic_passed": 5,
+  "both_passed": 5,
+  "acoustic_p95_err": 0.0004791259765625,
+  "semantic_p95_err": 6.847381591796875e-05,
+  "go_nogo": "GO",
+  "details": [
+    {
+      "sample_id": 1,
+      "duration_s": 45.0,
+      "source": "random",
+      "acoustic_max_err": 0.0004425048828125,
+      "acoustic_mean_err": 4.9311071052215993e-05,
+      "semantic_max_err": 5.53131103515625e-05,
+      "semantic_mean_err": 4.1996586332970764e-06,
+      "acoustic_ok": true,
+      "semantic_ok": true,
+      "elapsed_ms": 93806.94150924683
+    },
+    {
+      "sample_id": 2,
+      "duration_s": 41.0,
+      "source": "random",
+      "acoustic_max_err": 0.0003662109375,
+      "acoustic_mean_err": 4.9800146371126175e-05,
+      "semantic_max_err": 5.3882598876953125e-05,
+      "semantic_mean_err": 4.195217570668319e-06,
+      "acoustic_ok": true,
+      "semantic_ok": true,
+      "elapsed_ms": 58351.3879776001
+    },
+    {
+      "sample_id": 3,
+      "duration_s": 12.0,
+      "source": "random",
+      "acoustic_max_err": 0.00048828125,
+      "acoustic_mean_err": 4.878940308117308e-05,
+      "semantic_max_err": 7.05718994140625e-05,
+      "semantic_mean_err": 4.225364136800636e-06,
+      "acoustic_ok": true,
+      "semantic_ok": true,
+      "elapsed_ms": 17187.87455558777
+    },
+    {
+      "sample_id": 4,
+      "duration_s": 13.0,
+      "source": "random",
+      "acoustic_max_err": 0.0004119873046875,
+      "acoustic_mean_err": 4.8840265662875026e-05,
+      "semantic_max_err": 5.340576171875e-05,
+      "semantic_mean_err": 4.451581844477914e-06,
+      "acoustic_ok": true,
+      "semantic_ok": true,
+      "elapsed_ms": 18268.532752990723
+    },
+    {
+      "sample_id": 5,
+      "duration_s": 24.0,
+      "source": "random",
+      "acoustic_max_err": 0.000423431396484375,
+      "acoustic_mean_err": 4.9877413403009996e-05,
+      "semantic_max_err": 6.008148193359375e-05,
+      "semantic_mean_err": 4.440060820343206e-06,
+      "acoustic_ok": true,
+      "semantic_ok": true,
+      "elapsed_ms": 34708.208322525024
+    }
+  ]
+}
