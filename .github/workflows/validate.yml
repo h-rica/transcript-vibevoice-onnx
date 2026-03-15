@@ -2,14 +2,14 @@ name: Validate & Benchmark
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [main, dev]
     paths:
       - 'scripts/**'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/validate.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
     inputs:
       samples:
@@ -19,10 +19,10 @@ on:
 
 env:
   ORT_VERSION: "1.20.0"
-  HF_REPO: "microsoft/VibeVoice-ASR-HF"   # update if ONNX artifacts are hosted elsewhere
+  HF_REPO: "MiicaLabs/vibevoice-onnx-artifacts"
 
 jobs:
-  # ─── Job 1: Python validation + benchmark ──────────────────────────────────
+  # Job 1: Python validation + benchmark
   validate:
     name: Numerical validation + Benchmark (Python)
     runs-on: ubuntu-latest
@@ -134,7 +134,7 @@ jobs:
               f.write("\n".join(lines))
           EOF
 
-  # ─── Job 2: Rust build + test ───────────────────────────────────────────────
+  # Job 2: Rust build + test
   rust-test:
     name: Rust ort test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -142,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
