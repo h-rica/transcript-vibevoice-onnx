@@ -78,10 +78,12 @@ test-rust:
         --samples 3 \
         --output ../{{artifacts}}/
 
+# Upload ONNX artifacts to HuggingFace Hub
+upload-onnx:
+    uv run python scripts/upload_onnx.py --artifacts {{artifacts}}
+
 # Full workflow: export → validate → benchmark → test-rust
 all: export validate benchmark test-rust
-
-# Show generated artifacts and last validation verdict
 status:
     uv run python scripts/status.py --artifacts {{artifacts}}
 

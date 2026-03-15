@@ -3416,6 +3416,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "huggingface-hub" },
     { name = "librosa" },
     { name = "numpy" },
     { name = "onnx" },
@@ -3444,6 +3445,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.23.0" },
     { name = "jupyter", marker = "extra == 'notebooks'", specifier = ">=1.0.0" },
     { name = "librosa", specifier = ">=0.10.0" },
     { name = "matplotlib", marker = "extra == 'notebooks'", specifier = ">=3.8.0" },
