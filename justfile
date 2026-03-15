@@ -69,9 +69,8 @@ benchmark:
         --durations 5 15 30 60 120 300 \
         --output {{artifacts}}/
 
-# Build and run Rust ort inference test
+# Build and run Rust ort inference test (requires ORT_LIB_LOCATION set at system level)
 test-rust:
-    $env:ORT_LIB_LOCATION = "$(Resolve-Path onnxruntime-win-x64-{{ort_version}}\lib)"
     cd tests; cargo build --release
     cd tests; cargo run --release -- \
         --artifacts ../{{artifacts}}/ \

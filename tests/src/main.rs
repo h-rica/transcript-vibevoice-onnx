@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ndarray::Array2;
 use ort::{
@@ -18,7 +18,7 @@ use ort::{
     value::TensorRef,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn, error};
 
 // CLI
 #[derive(Parser, Debug)]
@@ -76,7 +76,7 @@ fn ort_error<E: std::fmt::Display>(error: E) -> anyhow::Error {
 fn build_session(model_path: &std::path::Path) -> Result<Session> {
     Session::builder()
         .map_err(ort_error)?
-        .with_optimization_level(GraphOptimizationLevel::Level1) // Level3 causes 2h+ load on laptop CPU
+        .with_optimization_level(GraphOptimizationLevel::Disable) // Level1+ too slow on laptop CPU (842 nodes)
         .map_err(ort_error)?
         .with_intra_threads(4)
         .map_err(ort_error)?
