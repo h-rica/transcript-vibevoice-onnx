@@ -1,0 +1,211 @@
+name: Validate & Benchmark
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/validate.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: 'Number of validation samples'
+        required: false
+        default: '10'
+
+env:
+  ORT_VERSION: "1.20.0"
+  HF_REPO: "microsoft/VibeVoice-ASR-HF"   # update if ONNX artifacts are hosted elsewhere
+
+jobs:
+  # ─── Job 1: Python validation + benchmark ──────────────────────────────────
+  validate:
+    name: Numerical validation + Benchmark (Python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Cache HuggingFace ONNX artifacts
+        id: cache-onnx
+        uses: actions/cache@v4
+        with:
+          path: artifacts/
+          key: onnx-${{ env.HF_REPO }}-v1
+
+      - name: Download ONNX artifacts from HuggingFace
+        if: steps.cache-onnx.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          uv run python - <<'EOF'
+          from huggingface_hub import hf_hub_download
+          import shutil, os
+
+          repo = os.environ["HF_REPO"]
+          for filename in ["vibevoice_acoustic.onnx", "vibevoice_semantic.onnx"]:
+              path = hf_hub_download(repo_id=repo, filename=f"onnx/{filename}")
+              shutil.copy(path, f"artifacts/{filename}")
+              print(f"✓ {filename}")
+          EOF
+
+      - name: Check ONNX files
+        run: |
+          ls -lh artifacts/*.onnx
+          for f in artifacts/*.onnx; do
+            echo "✓ $(basename $f): $(du -h $f | cut -f1)"
+          done
+
+      - name: Numerical validation
+        run: |
+          uv run python scripts/validate_numerical.py \
+            --artifacts artifacts/ \
+            --samples ${{ github.event.inputs.samples || '10' }} \
+            --output artifacts/
+        timeout-minutes: 30
+
+      - name: Benchmark
+        run: |
+          uv run python scripts/benchmark.py \
+            --artifacts artifacts/ \
+            --runs 3 \
+            --durations 5 15 30 \
+            --output artifacts/
+        timeout-minutes: 20
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-reports
+          path: |
+            artifacts/validation_report.json
+            artifacts/benchmark_report.json
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          uv run python - <<'EOF'
+          import json, os
+
+          p = "artifacts/validation_report.json"
+          if not os.path.exists(p):
+              print("No report found")
+              exit(0)
+
+          r = json.load(open(p))
+          verdict = "✅ GO" if r["go_nogo"] == "GO" else "❌ NO-GO"
+
+          lines = [
+              "## VibeVoice-ASR — Validation Results\n",
+              f"| | |",
+              f"|---|---|",
+              f"| Verdict | {verdict} |",
+              f"| Acoustic | {r['acoustic_passed']}/{r['n_samples']} (p95={r['acoustic_p95_err']:.2e}) |",
+              f"| Semantic | {r['semantic_passed']}/{r['n_samples']} (p95={r['semantic_p95_err']:.2e}) |",
+          ]
+
+          b = "artifacts/benchmark_report.json"
+          if os.path.exists(b):
+              bench = json.load(open(b))
+              cpu_30 = next((x for x in bench if x["provider"] == "CPU" and x["duration_s"] == 30), None)
+              if cpu_30:
+                  lines.append(f"| CPU RTFx (30s) | {cpu_30['total_rtfx']}× |")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines))
+          EOF
+
+  # ─── Job 2: Rust build + test ───────────────────────────────────────────────
+  rust-test:
+    name: Rust ort test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: validate   # only run if Python validation passed
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tests/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tests/Cargo.toml', 'tests/src/**') }}
+
+      - name: Install OnnxRuntime (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-linux-x64-${{ env.ORT_VERSION }}.tgz
+          tar -xzf onnxruntime-linux-x64-${{ env.ORT_VERSION }}.tgz
+          echo "ORT_LIB_LOCATION=$(pwd)/onnxruntime-linux-x64-${{ env.ORT_VERSION }}/lib" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$(pwd)/onnxruntime-linux-x64-${{ env.ORT_VERSION }}/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Install OnnxRuntime (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install onnxruntime
+          echo "ORT_LIB_LOCATION=$(brew --prefix onnxruntime)/lib" >> $GITHUB_ENV
+
+      - name: Install OnnxRuntime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/onnxruntime-win-x64-${{ env.ORT_VERSION }}.zip" -OutFile ort.zip
+          Expand-Archive ort.zip -DestinationPath . -Force
+          echo "ORT_LIB_LOCATION=$(Resolve-Path onnxruntime-win-x64-${{ env.ORT_VERSION }}\lib)" >> $env:GITHUB_ENV
+
+      - name: Cargo build
+        working-directory: tests
+        run: cargo build --release
+
+      - name: Restore ONNX cache
+        uses: actions/cache@v4
+        with:
+          path: artifacts/
+          key: onnx-${{ env.HF_REPO }}-v1
+
+      - name: Run Rust ort test
+        if: hashFiles('artifacts/vibevoice_acoustic.onnx') != ''
+        working-directory: tests
+        run: |
+          cargo run --release -- \
+            --artifacts ../artifacts/ \
+            --duration 5 \
+            --samples 2 \
+            --output ../artifacts/
+
+      - name: Upload Rust report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-report-${{ matrix.os }}
+          path: artifacts/rust_validation_report.json
+          retention-days: 30
