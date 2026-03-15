@@ -13,7 +13,7 @@ path = "src/main.rs"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 
 # Tensors
-ndarray = { version = "0.15", features = ["rayon"] }
+ndarray = { version = "0.17", features = ["rayon"] }
 
 # Sérialisation des résultats
 serde       = { version = "1", features = ["derive"] }

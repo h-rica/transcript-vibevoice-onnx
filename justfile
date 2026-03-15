@@ -5,11 +5,12 @@
 set shell := ["powershell", "-NoLogo", "-Command"]
 
 # Configurable variables
-artifacts := "artifacts"
-samples   := "20"
-threshold := "1e-4"
-duration  := "10"
-device    := "cpu"
+artifacts   := "artifacts"
+samples     := "20"
+threshold   := "1e-4"
+duration    := "10"
+device      := "cpu"
+ort_version := "1.20.0"
 
 # List available recipes (default)
 default:
@@ -18,6 +19,25 @@ default:
 # Install Python dependencies
 setup:
     uv sync
+
+# Download and extract OnnxRuntime (skips if already present)
+setup-ort:
+    if (Test-Path "onnxruntime-win-x64-{{ort_version}}") { \
+        Write-Host "ORT already present: onnxruntime-win-x64-{{ort_version}}" \
+    } else { \
+        Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v{{ort_version}}/onnxruntime-win-x64-{{ort_version}}.zip" -OutFile ort.zip; \
+        Expand-Archive ort.zip -DestinationPath . -Force; \
+        Remove-Item ort.zip; \
+        Write-Host "ORT extracted: onnxruntime-win-x64-{{ort_version}}" \
+    }
+
+# Print the ORT_LIB_LOCATION to set manually if needed
+ort-env:
+    Write-Host "$env:ORT_LIB_LOCATION = '$(Resolve-Path onnxruntime-win-x64-{{ort_version}}\lib)'"
+
+# Build Rust binary only (no run)
+build-rust:
+    cd tests; cargo build --release
 
 # Export both tokenizers to ONNX
 export:
@@ -51,8 +71,9 @@ benchmark:
 
 # Build and run Rust ort inference test
 test-rust:
-    cd tests && cargo build --release
-    cd tests && cargo run --release -- \
+    $env:ORT_LIB_LOCATION = "$(Resolve-Path onnxruntime-win-x64-{{ort_version}}\lib)"
+    cd tests; cargo build --release
+    cd tests; cargo run --release -- \
         --artifacts ../{{artifacts}}/ \
         --duration {{duration}} \
         --samples 3 \

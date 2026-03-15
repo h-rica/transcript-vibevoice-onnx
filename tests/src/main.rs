@@ -2,32 +2,25 @@
 //!
 //! Validates the ort Rust runtime for VibeVoice-ASR ONNX tokenizers.
 //!
-//! This binary:
-//!   1. Loads vibevoice_acoustic.onnx and vibevoice_semantic.onnx
-//!   2. Runs inference with a synthetic audio signal
-//!   3. Verifies that output shapes match expectations
-//!   4. Measures inference latency
-//!   5. Writes a JSON report
-//!
 //! Usage:
 //!   cargo run -- --artifacts ../../artifacts/
 //!   cargo run -- --artifacts ../../artifacts/ --duration 30 --samples 5
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ndarray::Array2;
 use ort::{
-    inputs, Environment, ExecutionProvider, GraphOptimizationLevel,
-    Session, SessionBuilder,
+    inputs,
+    session::{builder::GraphOptimizationLevel, Session},
+    value::TensorRef,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn, error};
 
 // CLI
-
 #[derive(Parser, Debug)]
 #[command(
     name    = "vibevoice-ort-test",
@@ -43,31 +36,20 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     duration: usize,
 
-    /// Number of samples for benchmarking
+    /// Number of inference samples
     #[arg(long, default_value_t = 3)]
     samples: usize,
 
     /// Output directory for the JSON report
     #[arg(long, default_value = "../../artifacts")]
     output: PathBuf,
-
-    /// Enable CoreML on macOS
-    #[arg(long, default_value_t = false)]
-    coreml: bool,
-
-    /// Enable CUDA
-    #[arg(long, default_value_t = false)]
-    cuda: bool,
 }
-
-// Types
 
 #[derive(Debug, Serialize, Deserialize)]
 struct InferenceResult {
     component:     String,
     duration_s:    usize,
     output_shape:  Vec<usize>,
-    /// Effective frame rate in Hz (expected: ~7.5 Hz)
     frame_rate_hz: f64,
     latency_ms:    f64,
     rtfx:          f64,
@@ -83,52 +65,30 @@ struct ValidationReport {
     acoustic_ok:      bool,
     semantic_ok:      bool,
     go_nogo:          String,
-    ort_version:      String,
     platform:         String,
 }
 
+fn ort_error<E: std::fmt::Display>(error: E) -> anyhow::Error {
+    anyhow!(error.to_string())
+}
+
 // Session builder
-fn build_session(
-    env:        &std::sync::Arc<Environment>,
-    model_path: &Path,
-    use_coreml: bool,
-    use_cuda:   bool,
-) -> Result<Session> {
-    let mut builder = SessionBuilder::new(env)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(4)?;
-
-    if use_coreml {
-        #[cfg(target_os = "macos")]
-        {
-            builder = builder.with_execution_providers([
-                ExecutionProvider::CoreML(Default::default()),
-                ExecutionProvider::CPU(Default::default()),
-            ])?;
-            info!("Provider: CoreML (Metal)");
-        }
-    } else if use_cuda {
-        builder = builder.with_execution_providers([
-            ExecutionProvider::CUDA(Default::default()),
-            ExecutionProvider::CPU(Default::default()),
-        ])?;
-        info!("Provider: CUDA");
-    } else {
-        builder = builder.with_execution_providers([
-            ExecutionProvider::CPU(Default::default()),
-        ])?;
-        info!("Provider: CPU");
-    }
-
-    builder
-        .with_model_from_file(model_path)
+fn build_session(model_path: &std::path::Path) -> Result<Session> {
+    Session::builder()
+        .map_err(ort_error)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(ort_error)?
+        .with_intra_threads(4)
+        .map_err(ort_error)?
+        .commit_from_file(model_path)
+        .map_err(ort_error)
         .with_context(|| format!("Failed to load model: {}", model_path.display()))
 }
 
 // Inference
+
 const SAMPLE_RATE: usize = 24_000;
 
-/// Generate a synthetic audio signal (composite sine wave).
 fn generate_test_audio(duration_s: usize) -> Array2<f32> {
     let n_samples = SAMPLE_RATE * duration_s;
     let data: Vec<f32> = (0..n_samples)
@@ -145,7 +105,7 @@ fn generate_test_audio(duration_s: usize) -> Array2<f32> {
 }
 
 fn run_inference(
-    session:    &Session,
+    session:    &mut Session,
     audio:      &Array2<f32>,
     output_key: &str,
     component:  &str,
@@ -154,17 +114,21 @@ fn run_inference(
     let t0 = Instant::now();
 
     let result = (|| -> Result<(Vec<usize>, f64)> {
-        let input_tensor = ort::Value::from_array(session.allocator(), audio)?;
-        let outputs      = session.run(inputs!["audio" => input_tensor]?)?;
+        let audio_input = TensorRef::from_array_view(audio)
+            .map_err(ort_error)
+            .context("Failed to create ONNX input tensor")?;
+        let outputs = session.run(inputs!["audio" => audio_input])
+            .map_err(ort_error)
+            .context("ONNX inference failed")?;
 
-        let output    = outputs[output_key]
-            .extract_tensor::<f32>()
+        let (shape, _) = outputs[output_key]
+            .try_extract_tensor::<f32>()
+            .map_err(ort_error)
             .context("Failed to extract output tensor")?;
 
-        let shape: Vec<usize> = output.view().shape().to_vec();
+        let shape: Vec<usize> = shape.iter().map(|dim| *dim as usize).collect();
         info!("{} output shape: {:?}", component, shape);
 
-        // Verify effective frame rate (~7.5 Hz expected)
         let n_frames      = shape.get(1).copied().unwrap_or(0);
         let frame_rate_hz = n_frames as f64 / duration_s as f64;
 
@@ -211,13 +175,11 @@ fn run_inference(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "vibevoice_ort_test=info".to_string())
-                .as_str()
         )
         .init();
 
@@ -239,18 +201,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Acoustic ONNX: {}", acoustic_path.display());
-    info!("Semantic ONNX: {}", semantic_path.display());
-
-    let env = Environment::builder()
-        .with_name("vibevoice-validation")
-        .build()?
-        .into_arc();
-
     println!("[1/3] Loading ONNX sessions...");
-    let acoustic_session = build_session(&env, &acoustic_path, cli.coreml, cli.cuda)
+    let mut acoustic_session = build_session(&acoustic_path)
         .context("Failed to load acoustic session")?;
-    let semantic_session = build_session(&env, &semantic_path, cli.coreml, cli.cuda)
+    let mut semantic_session = build_session(&semantic_path)
         .context("Failed to load semantic session")?;
     println!("    ✓ Sessions loaded\n");
 
@@ -263,11 +217,11 @@ async fn main() -> Result<()> {
         let audio = generate_test_audio(cli.duration);
         print!("    Sample {:02}/{:02} ... ", i + 1, cli.samples);
 
-        let a = run_inference(&acoustic_session, &audio, "latents",          "acoustic", cli.duration);
-        let s = run_inference(&semantic_session, &audio, "semantic_latents", "semantic", cli.duration);
+        let a = run_inference(&mut acoustic_session, &audio, "latents",          "acoustic", cli.duration);
+        let s = run_inference(&mut semantic_session, &audio, "semantic_latents", "semantic", cli.duration);
 
         println!(
-            "acoustic [{}] {:.0}ms (RTFx {:.1}×)  semantic [{}] {:.0}ms (RTFx {:.1}×)",
+            "acoustic [{}] {:.0}ms (RTFx {:.1}x)  semantic [{}] {:.0}ms (RTFx {:.1}x)",
             if a.success { "✓" } else { "✗" }, a.latency_ms, a.rtfx,
             if s.success { "✓" } else { "✗" }, s.latency_ms, s.rtfx,
         );
@@ -287,7 +241,6 @@ async fn main() -> Result<()> {
         acoustic_ok,
         semantic_ok,
         go_nogo:          go_nogo.to_string(),
-        ort_version:      ort::version().to_string(),
         platform:         format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
     };
 
@@ -312,7 +265,6 @@ fn print_summary(report: &ValidationReport) {
     println!("║  Semantic tokenizer : {:<35}║",
              if report.semantic_ok { "✓ OK" } else { "✗ FAILED" });
     println!("║  Platform           : {:<35}║", report.platform);
-    println!("║  ORT version        : {:<35}║", report.ort_version);
     println!("╚══════════════════════════════════════════════════════════╝");
 }
 
