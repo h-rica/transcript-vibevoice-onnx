@@ -26,8 +26,10 @@ def main():
     print(f"✓ Repo ready: https://huggingface.co/{REPO_ID}")
 
     files = {
-        "vibevoice_acoustic.onnx": "onnx/vibevoice_acoustic.onnx",
-        "vibevoice_semantic.onnx": "onnx/vibevoice_semantic.onnx",
+        "vibevoice_acoustic.onnx":      "onnx/vibevoice_acoustic.onnx",
+        "vibevoice_acoustic.onnx.data": "onnx/vibevoice_acoustic.onnx.data",
+        "vibevoice_semantic.onnx":      "onnx/vibevoice_semantic.onnx",
+        "vibevoice_semantic.onnx.data": "onnx/vibevoice_semantic.onnx.data",
     }
 
     for local_name, repo_path in files.items():

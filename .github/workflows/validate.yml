@@ -60,7 +60,10 @@ jobs:
           import shutil, os
 
           repo = os.environ["HF_REPO"]
-          for filename in ["vibevoice_acoustic.onnx", "vibevoice_semantic.onnx"]:
+          for filename in [
+              "vibevoice_acoustic.onnx", "vibevoice_acoustic.onnx.data",
+              "vibevoice_semantic.onnx", "vibevoice_semantic.onnx.data",
+          ]:
               path = hf_hub_download(repo_id=repo, filename=f"onnx/{filename}")
               shutil.copy(path, f"artifacts/{filename}")
               print(f"✓ {filename}")
