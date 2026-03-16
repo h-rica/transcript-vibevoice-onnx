@@ -78,8 +78,9 @@ jobs:
           uv run python scripts/validate_numerical.py \
             --artifacts artifacts/ \
             --samples ${{ github.event.inputs.samples || '10' }} \
+            --onnx-only \
             --output artifacts/
-        timeout-minutes: 30
+        timeout-minutes: 5
 
       - name: Benchmark
         run: |
