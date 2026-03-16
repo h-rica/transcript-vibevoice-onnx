@@ -22,7 +22,7 @@ env:
   HF_REPO: "MiicaLabs/vibevoice-onnx-artifacts"
 
 jobs:
-  # Job 1: Python validation + benchmark
+  # ─── Job 1: Python validation + benchmark ──────────────────────────────────
   validate:
     name: Numerical validation + Benchmark (Python)
     runs-on: ubuntu-latest
@@ -117,15 +117,21 @@ jobs:
 
           r = json.load(open(p))
           verdict = "✅ GO" if r["go_nogo"] == "GO" else "❌ NO-GO"
+          mode = r.get("mode", "full")
 
           lines = [
               "## VibeVoice-ASR — Validation Results\n",
               f"| | |",
               f"|---|---|",
               f"| Verdict | {verdict} |",
-              f"| Acoustic | {r['acoustic_passed']}/{r['n_samples']} (p95={r['acoustic_p95_err']:.2e}) |",
-              f"| Semantic | {r['semantic_passed']}/{r['n_samples']} (p95={r['semantic_p95_err']:.2e}) |",
+              f"| Mode | {mode} |",
+              f"| Acoustic | {r['acoustic_passed']}/{r['n_samples']} |",
+              f"| Semantic | {r['semantic_passed']}/{r['n_samples']} |",
           ]
+
+          if "acoustic_p95_err" in r:
+              lines.append(f"| Acoustic p95 err | {r['acoustic_p95_err']:.2e} |")
+              lines.append(f"| Semantic p95 err | {r['semantic_p95_err']:.2e} |")
 
           b = "artifacts/benchmark_report.json"
           if os.path.exists(b):
@@ -138,7 +144,7 @@ jobs:
               f.write("\n".join(lines))
           EOF
 
-  # Job 2: Rust build + test
+  # ─── Job 2: Rust build + test ───────────────────────────────────────────────
   rust-test:
     name: Rust ort test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
